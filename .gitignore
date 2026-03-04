@@ -79,3 +79,5 @@ Thumbs.db
 # *.pth
 # *.onnx
 # *.pkl
+
+upload_img/
