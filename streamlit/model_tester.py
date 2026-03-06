@@ -1,9 +1,13 @@
 import os
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
 from PIL import Image
+from pytorch_grad_cam import GradCAMPlusPlus
+from pytorch_grad_cam.utils.image import show_cam_on_image
+from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 from torchvision import models
 
 import streamlit as st
@@ -73,6 +77,30 @@ def preprocess(image: Image.Image) -> torch.Tensor:
 
 
 # =====================================================================
+# GradCAM++
+# =====================================================================
+def compute_gradcam_pp(model, image: Image.Image) -> np.ndarray:
+    """GradCAM++ 오버레이 이미지(H×W×3 uint8 ndarray)를 반환한다."""
+    for param in model.parameters():
+        param.requires_grad = True
+
+    input_tensor = transform(image).unsqueeze(0)
+    pred = model(input_tensor)
+    pred_class = int(torch.sigmoid(pred).argmax().item())
+
+    cam_pp = GradCAMPlusPlus(
+        model=model, target_layers=[model.features[-1]]
+    )
+    gradcam_map = cam_pp(
+        input_tensor=input_tensor,
+        targets=[ClassifierOutputTarget(pred_class)],
+    )[0]
+
+    rgb_img = np.array(image.resize((224, 224))).astype(np.float32) / 255.0
+    return show_cam_on_image(rgb_img, gradcam_map, use_rgb=True)
+
+
+# =====================================================================
 # 예측
 # =====================================================================
 def predict_multilabel(model, tensor: torch.Tensor, config: dict):
@@ -117,8 +145,6 @@ if uploaded_file is not None:
     image = Image.open(uploaded_file).convert("RGB")
 
     col1, col2 = st.columns([1, 2])
-    with col1:
-        st.image(image, caption="업로드한 이미지", use_container_width=True)
 
     with col2:
         with st.spinner("모델 로딩 중..."):
@@ -159,3 +185,9 @@ if uploaded_file is not None:
                 f"{n_filled}/{total} 필드",
                 f"{n_filled / total * 100:.1f}%",
             )
+
+    with col1:
+        st.image(image, caption="업로드한 이미지", use_container_width=True)
+        with st.spinner("GradCAM++ 생성 중..."):
+            gradcam_img = compute_gradcam_pp(model, image)
+        st.image(gradcam_img, caption="GradCAM++ 히트맵", use_container_width=True)
