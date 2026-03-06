@@ -7,6 +7,8 @@ http://localhost:7394/docs
 streamlit 실행
 .venv\Scripts\streamlit.exe run streamlit\face_streamlit_main.py --server.port 8501
 
+..\.venv\Scripts\streamlit.exe run model_tester.py --server.port 8501
+
 http://localhost:8501/
 
 멀티라벨 샘플코드
