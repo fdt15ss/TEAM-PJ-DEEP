@@ -48,6 +48,12 @@ pip-wheel-metadata/
 *.log
 
 # =========================
+# Images (generated outputs)
+# =========================
+*.png
+**/*.png
+
+# =========================
 # Environment / secrets
 # =========================
 .env
@@ -89,3 +95,7 @@ upload_img/
 
 *.pt
 *.pth
+
+data2/
+data3/
+
