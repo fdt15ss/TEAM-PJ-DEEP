@@ -88,9 +88,7 @@ def compute_gradcam_pp(model, image: Image.Image) -> np.ndarray:
     pred = model(input_tensor)
     pred_class = int(torch.sigmoid(pred).argmax().item())
 
-    cam_pp = GradCAMPlusPlus(
-        model=model, target_layers=[model.features[-1]]
-    )
+    cam_pp = GradCAMPlusPlus(model=model, target_layers=[model.features[-1]])
     gradcam_map = cam_pp(
         input_tensor=input_tensor,
         targets=[ClassifierOutputTarget(pred_class)],
