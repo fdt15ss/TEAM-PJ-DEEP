@@ -287,14 +287,22 @@ print(f"Test Element-wise Accuracy: {acc:.4f}")
 # Phase 5 — GradCAM 시각화
 # =====================================================================
 def visualize_gradcam_pp(model, img_pil, filename, save_path="gradcam_result.png"):
-    """GradCAM++ 히트맵을 생성하고 저장한다."""
+    """GradCAM++ 히트맵을 생성하고 저장한다.
+
+    Returns:
+        dict:
+            pred_class  (int)         - 가장 높은 확률의 클래스 인덱스
+            probs       (list[float]) - 14개 클래스별 sigmoid 확률
+            gradcam_img (np.ndarray)  - GradCAM++ 오버레이 이미지 (H×W×3, uint8)
+    """
     for param in model.parameters():
         param.requires_grad = True
 
     input_tensor = transform_val(img_pil).unsqueeze(0).to(device)
 
     pred = model(input_tensor)
-    pred_class = torch.sigmoid(pred).argmax().item()
+    probs = torch.sigmoid(pred).squeeze().tolist()
+    pred_class = int(torch.sigmoid(pred).argmax().item())
 
     target_layers = [model.features[-1]]
     targets = [ClassifierOutputTarget(pred_class)]
@@ -315,6 +323,12 @@ def visualize_gradcam_pp(model, img_pil, filename, save_path="gradcam_result.png
     plt.show()
     print(f"Saved: {save_path}")
 
+    return {
+        "pred_class": pred_class,
+        "probs": probs,
+        "gradcam_img": vis_pp,
+    }
+
 
 model.load_state_dict(torch.load(BEST_MODEL_PATH, map_location=device))
 model.eval()
@@ -325,4 +339,9 @@ first_row = test_dataset.df.iloc[0]
 img_path = os.path.join(TEST_IMG_DIR, first_row["filename"])
 img_pil = Image.open(img_path).convert("RGB")
 
-visualize_gradcam_pp(model, img_pil, first_row["filename"])
+result = visualize_gradcam_pp(model, img_pil, first_row["filename"])
+print(f"pred_class : {result['pred_class']} ({LABEL_COLS[result['pred_class']]})")
+print(f"probs      : {[f'{p:.4f}' for p in result['probs']]}")
+print(
+    f"gradcam_img: shape={result['gradcam_img'].shape}, dtype={result['gradcam_img'].dtype}"
+)
