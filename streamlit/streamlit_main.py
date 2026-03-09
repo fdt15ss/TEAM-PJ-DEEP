@@ -369,6 +369,8 @@ MODEL_DIR = PROJECT_ROOT / "best_model"
 # 초기화(없으면 만들어두기)
 if "predictions" not in st.session_state:
     st.session_state.predictions = None
+if "analysis_counter" not in st.session_state:
+    st.session_state.analysis_counter = 0
 
 # 민원 분류 함수
 def classify_complaint(text):
@@ -386,6 +388,7 @@ def classify_complaint(text):
         for pred in data.get("predictions", []):
             predictions.append((pred[0], pred[1]))
         
+        print(f"API 응답: {predictions}")  # 디버깅용 로그
         return predictions
     except Exception as e:
         st.error(f"API 호출 실패: {str(e)}")
@@ -504,6 +507,26 @@ def classify_document(img_bytes, filename):
         return None, 0.0
 
 
+# 전입신고서 필드 분석 함수
+def analyze_document_fields(img_bytes, filename):
+    """전입신고서 필드 분석 - FastAPI 서버 호출"""
+    try:
+        files = {"file": (filename, io.BytesIO(img_bytes), "image/jpeg")}
+        response = requests.post(
+            f"{API_BASE_URL}/efficiNetB4",
+            files=files
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        print(f"필드 분석 API 응답: {data}")  # 디버깅용 로그
+        
+        return data
+    except Exception as e:
+        st.error(f"필드 분석 API 호출 실패: {str(e)}")
+        return None
+
+
 
 # 메인 UI인터페이스
 def main():
@@ -528,6 +551,9 @@ def main():
     if analyze_btn:
         if complaint_text.strip():
             with st.spinner("🔄 민원 분석 중..."):
+                st.session_state.analysis_counter += 1  # 분석 카운터 증가 (UI 초기화용)
+                st.session_state.predictions = None  # 이전 결과 초기화
+                st.session_state.uploaded_docs = {}  # 업로드된 문서 초기화
                 st.session_state.predictions = classify_complaint(complaint_text)
         else:
             st.warning("민원 내용을 입력해주세요.")
@@ -623,7 +649,7 @@ def main():
         
         # 문서별 카드 생성
         for idx, (doc, prob) in enumerate(list(documents.items())[:6]):
-            doc_key = f"doc_{idx}_{doc}"
+            doc_key = f"doc_{idx}_{doc}_{st.session_state.analysis_counter}"  # 카운터 추가로 UI 초기화
             
             # HTML 카드 시작
             st.markdown(f"""
@@ -672,6 +698,8 @@ def main():
                     
                     if predicted_class:
                         # 분류 결과가 예상 문서와 일치하는지 확인
+                        if predicted_class == "운전면허증" or predicted_class == "주민등록증":
+                            predicted_class = "신분증"
                         is_valid = predicted_class == doc
                         status_icon = "✅" if is_valid else "⚠️"
                         status_text = f"{predicted_class} ({confidence:.1%})" if is_valid else f"불일치: {predicted_class}"
@@ -693,7 +721,51 @@ def main():
                         <div class="status-badge {status_class}">{status_icon} {status_text}</div>
                     </div>
                 """, unsafe_allow_html=True)
+                
+                # 전입신고서인 경우 필드 분석 결과 추가 표시
+                if predicted_class == "전입신고서":
+                    st.markdown('<div class="field-analysis-section" style="margin-top: 1em; padding: 1em; background: #f8f9fa; border-radius: 0.6em; border-left: 4px solid #6c5ce7;">', unsafe_allow_html=True)
+                    st.markdown('<div style="font-weight: 600; color: #6c5ce7; margin-bottom: 0.8em;">📋 전입신고서 필드 분석 결과</div>', unsafe_allow_html=True)
+                    
+                    # 필드 분석 API 호출
+                    field_data = analyze_document_fields(img_bytes, file_name)
+                    
+                    if field_data:
+                        # 필드별 결과 표시
+                        predictions = field_data.get("predictions", [])
+                        gradcam_b64 = field_data.get("gradcam_b64", "")
+                        
+                        # 필드 결과를 그리드 형태로 표시
+                        cols = st.columns(2)
+                        for i, pred in enumerate(predictions):
+                            col_idx = i % 2
+                            with cols[col_idx]:
+                                status_icon = "✅" if pred["pred"] else "❌"
+                                status_color = "#27ae60" if pred["pred"] else "#e74c3c"
+                                st.markdown(f"""
+                                <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5em; margin-bottom: 0.5em; background: white; border-radius: 0.4em; border: 1px solid #e0e0e0;">
+                                    <span style="font-weight: 500; font-size: 0.9em;">{pred['label']}</span>
+                                    <div style="display: flex; align-items: center; gap: 0.5em;">
+                                        <span style="font-size: 0.8em; color: #666;">{pred['prob']:.1%}</span>
+                                        <span style="font-size: 1.2em;">{status_icon}</span>
+                                    </div>
+                                </div>
+                                """, unsafe_allow_html=True)
+                        
+                        # GradCAM 이미지 표시
+                        if gradcam_b64:
+                            st.markdown('<div style="margin-top: 1em; text-align: center;">', unsafe_allow_html=True)
+                            st.markdown('<div style="font-weight: 600; color: #6c5ce7; margin-bottom: 0.5em;">🔍 GradCAM 분석 결과</div>', unsafe_allow_html=True)
+                            st.image(f"data:image/png;base64,{gradcam_b64}", caption="모델이 주목한 영역", use_column_width=True)
+                            st.markdown('</div>', unsafe_allow_html=True)
+                    else:
+                        st.error("필드 분석에 실패했습니다.")
+                    
+                    st.markdown('</div>', unsafe_allow_html=True)
             else:
+                st.markdown("""
+                    <div class="status-empty">📁 파일을 선택하면<br/>검증 결과가 표시됩니다</div>
+                """, unsafe_allow_html=True)
                 st.markdown("""
                     <div class="status-empty">📁 파일을 선택하면<br/>검증 결과가 표시됩니다</div>
                 """, unsafe_allow_html=True)
