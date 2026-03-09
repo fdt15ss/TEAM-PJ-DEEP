@@ -53,8 +53,7 @@ LABEL_COLS = [
     "신청인_서명도장",
 ]
 
-device = "cuda:1" if torch.cuda.is_available() else "cpu"
-print('device:' + device)
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # =====================================================================
 # Phase 1 — Transform 정의
@@ -129,7 +128,7 @@ def build_model():
 # =====================================================================
 # Phase 3 — Optuna 하이퍼파라미터 최적화
 # =====================================================================
-train_dataset = MultiLabelDataset(TRAIN_CSV, TRAIN_IMG_DIR, transform_train)
+train_dataset = MultiLabelDataset(TRAIN_CSV, TRAIN_IMG_DIR, transfo5rm_train)
 val_dataset = MultiLabelDataset(VAL_CSV, VAL_IMG_DIR, transform_val)
 
 
