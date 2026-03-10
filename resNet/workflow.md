@@ -65,7 +65,7 @@ fc           →  Linear(2048, 14)            ← 교체 대상
 > 3. **GradCAM target layer**
 >    `[model.features[-1]]` → `[model.layer4[-1]]`
 >    ResNet-50에서 마지막 Conv 출력은 `layer4`의 마지막 Bottleneck 블록이다.
->    `wd8_fine_final.ipynb` 패턴: `target_layers = [model.layer4[-1]]`
+>    `.ipynb` 패턴: `target_layers = [model.layer4[-1]]`
 
 ---
 
@@ -87,7 +87,7 @@ fc           →  Linear(2048, 14)            ← 교체 대상
 - `transform_val/test`: 리사이즈 + ImageNet 정규화만 적용 (증강 없음)
 
 > **`RandomHorizontalFlip` 제외 근거**: 전입신고서는 정형화된 행정 양식 스캔 이미지이므로 좌우 반전 시 필드 위치가 역전되어 역효과 발생.
-> `wd8_fine_final.ipynb`는 인물 이미지 기준이므로 `RandomHorizontalFlip`을 사용하나, 본 프로젝트에서는 `ColorJitter`만 사용한다.
+> `.ipynb`는 인물 이미지 기준이므로 `RandomHorizontalFlip`을 사용하나, 본 프로젝트에서는 `ColorJitter`만 사용한다.
 
 **3. MultiLabelDataset (Custom Dataset)**
 
@@ -99,7 +99,7 @@ fc           →  Linear(2048, 14)            ← 교체 대상
 # =====================================================================
 # [주의] ImageFolder를 사용하지 않는 이유
 # =====================================================================
-# wd8_fine_final.ipynb 는 ImageFolder(클래스별 서브폴더) 구조를 사용하지만,
+# 는 ImageFolder(클래스별 서브폴더) 구조를 사용하지만,
 # 이 프로젝트는 data2/train/ 아래 모든 이미지가 하나의 폴더에 평탄(flat)하게 존재하며
 # 레이블은 별도 CSV에 14개 이진값으로 정의된다.
 # → torch.utils.data.Dataset을 직접 상속한 커스텀 클래스를 사용한다.
@@ -128,7 +128,7 @@ for param in model.layer4.parameters():
 model.fc = nn.Linear(2048, NUM_CLASSES)
 ```
 
-> `wd8_fine_final.ipynb`의 Fine-Tuning 패턴 적용 (ResNet-34 기준 → ResNet-50으로 변경)
+> `.ipynb`의 Fine-Tuning 패턴 적용 (ResNet-34 기준 → ResNet-50으로 변경)
 >
 > - `layer1~layer3` : 저수준~중수준 범용 특징(엣지, 텍스처, 형태) → 동결 유지
 > - `layer4` : 고수준 의미적 특징 담당 → 우리 도메인에 맞게 조정
@@ -165,6 +165,38 @@ print(study.best_trial.params)
 - Optuna에서 찾은 `batch_size`, `lr`로 DataLoader 재생성
 - `tqdm` 진행 표시
 - Early Stopping (patience = 3): val_loss 개선 시 `best_model_resNet50.pth` 저장
+- **TensorBoard 기록** (`SummaryWriter` 사용)
+
+**TensorBoard 기록 항목**
+
+| 태그 | 기록 시점 | x축 기준 | 내용 |
+| ------------- | --------- | ------------------------- | ------------------------------ |
+| `Loss/train`  | 배치마다  | `global_step` (배치 누적) | 배치별 학습 손실 |
+| `Loss/val`    | 에포크마다 | `epoch`                  | 에포크 평균 검증 손실 |
+| `Acc/val`     | 에포크마다 | `epoch`                  | element-wise 검증 정확도 |
+
+```python
+writer = SummaryWriter()   # runs/<타임스탬프>/ 에 자동 저장
+global_step = 0
+
+# 배치 루프 내
+writer.add_scalar("Loss/train", loss.item(), global_step)
+global_step += 1
+
+# 에포크 끝 — val loss/acc 동시 기록
+writer.add_scalar("Loss/val", total_val_loss, epoch)
+writer.add_scalar("Acc/val", val_acc, epoch)
+writer.flush()   # 매 에포크마다 디스크에 즉시 기록
+
+# 학습 완료 후
+writer.close()
+```
+
+> **확인 방법**
+> ```bash
+> tensorboard --logdir=runs
+> # → 브라우저에서 http://localhost:6006 접속 → Scalars 탭
+> ```
 
 ```python
 # =====================================================================
@@ -174,7 +206,7 @@ print(study.best_trial.params)
 # 개선이 있을 때마다 best_model_resNet50.pth 를 덮어저장하며,
 # 종료 시점이 아닌 "가장 좋았던 시점"의 모델이 최종 결과물이 된다.
 #
-# wd8_fine_final.ipynb 의 early stopping 구조 동일 적용
+# 의 early stopping 구조 적용
 #   stop_count = 3 → PATIENCE = 3
 #   early_stop_count 카운터로 연속 미개선 횟수 추적
 # =====================================================================
@@ -198,7 +230,7 @@ print(study.best_trial.params)
 - subplot 2개로 GradCAM / GradCAMPlusPlus 비교 시각화
 - 결과 `gradcam_resNet50_result.png` 저장
 
-> `wd8_fine_final.ipynb`의 GradCAM 코드 구조 적용
+> `.ipynb`의 GradCAM 코드 구조 적용
 > `target_layers = [model.layer4[-1]]` 패턴 그대로 사용
 
 ---
@@ -208,7 +240,7 @@ print(study.best_trial.params)
 | 파일                              | 참조 내용                                                                  |
 | --------------------------------- | -------------------------------------------------------------------------- |
 | `efficiNetB4/efficiNetB4_main.py` | 전체 파이프라인 구조 (Dataset, Optuna, Early Stopping, GradCAM)            |
-| `resNet/wd8_fine_final.ipynb`     | ResNet layer4 unfreeze, fc 교체, Early Stopping, GradCAM target layer 패턴 |
+| `resNet/.ipynb`     | ResNet layer4 unfreeze, fc 교체, Early Stopping, GradCAM target layer 패턴, TensorBoard `SummaryWriter` 패턴 |
 | `resNet/modelselect.md`           | ResNet-50 선택 근거 및 데이터 분석                                         |
 | `data2/train_labels.csv` 등       | 14개 이진 레이블, 파일명 참조                                              |
 
@@ -228,3 +260,4 @@ print(study.best_trial.params)
 | 데이터 증강             | ColorJitter(brightness=0.2, contrast=0.2) | 행정 서식 도메인 특성 (반전 부적합)   |
 | GradCAM target          | `[model.layer4[-1]]`                      | ResNet 마지막 Conv 출력               |
 | 모델 저장명             | `best_model_resNet50.pth`                 | EfficientNetB4·ConvNeXt와 이름 구분   |
+| TensorBoard 기록        | `Loss/train`(배치), `Loss/val`+`Acc/val`(에포크) | 학습 곡선·과적합 여부 실시간 모니터링 |

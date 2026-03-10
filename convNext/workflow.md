@@ -164,6 +164,38 @@ print(study.best_trial.params)
 - Optuna에서 찾은 `batch_size`, `lr`로 DataLoader 재생성
 - `tqdm` 진행 표시
 - Early Stopping (patience = 3): val_loss 개선 시 `best_model_convNext.pth` 저장
+- **TensorBoard 기록** (`SummaryWriter` 사용)
+
+**TensorBoard 기록 항목**
+
+| 태그 | 기록 시점 | x축 기준 | 참조 노트북 대응 |
+| ------------- | --------- | ------------------------- | --------------------------------- |
+| `Loss/train`  | 배치마다  | `global_step` (배치 누적) | `writer.add_scalar("Loss/train")` |
+| `Loss/val`    | 에포크마다 | `epoch`                  | `writer_ft.add_scalar(...)` |
+| `Acc/val`     | 에포크마다 | `epoch`                  | element-wise accuracy |
+
+```python
+writer = SummaryWriter()   # runs/<타임스탬프>/ 에 자동 저장
+global_step = 0
+
+# 배치 루프 내
+writer.add_scalar("Loss/train", loss.item(), global_step)
+global_step += 1
+
+# 에포크 끝 — val loss/acc 동시 기록
+writer.add_scalar("Loss/val", total_val_loss, epoch)
+writer.add_scalar("Acc/val", val_acc, epoch)
+writer.flush()   # 매 에포크마다 디스크에 즉시 기록
+
+# 학습 완료 후
+writer.close()
+```
+
+> **확인 방법**
+> ```bash
+> tensorboard --logdir=runs
+> # → 브라우저에서 http://localhost:6006 접속 → Scalars 탭
+> ```
 
 ```python
 # =====================================================================
@@ -210,7 +242,7 @@ print(study.best_trial.params)
 | 파일                                    | 참조 내용                                                                |
 | --------------------------------------- | ------------------------------------------------------------------------ |
 | `efficiNetB4/efficiNetB4_main.py`       | 전체 파이프라인 구조 (Dataset, Optuna, Early Stopping, GradCAM)          |
-| `convNext/wd8_skin_fine_convNext.ipynb` | ConvNeXt 모델 로드·freeze·unfreeze·헤드교체·Fine-Tuning 패턴 (STEP 9~14) |
+| `convNext/wd8_skin_fine_convNext.ipynb` | ConvNeXt 모델 로드·freeze·unfreeze·헤드교체·Fine-Tuning 패턴 (STEP 9~14), TensorBoard `SummaryWriter` 패턴 (Cell 31, 37) |
 | `data2/train_labels.csv` 등             | 14개 이진 레이블, 파일명 참조                                            |
 
 ---
@@ -229,3 +261,4 @@ print(study.best_trial.params)
 | 데이터 증강             | ColorJitter(brightness=0.2, contrast=0.2) | 행정 서식 도메인 특성 (반전 부적합)        |
 | GradCAM target          | test셋 첫 번째 이미지 (자동)              | 재현성 보장                                |
 | 모델 저장명             | `best_model_convNext.pth`                 | EfficientNetB4와 이름 구분                 |
+| TensorBoard 기록        | `Loss/train`(배치), `Loss/val`+`Acc/val`(에포크) | 학습 곡선·과적합 여부 실시간 모니터링 |
