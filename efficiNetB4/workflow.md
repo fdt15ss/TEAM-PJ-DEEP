@@ -32,10 +32,196 @@ EfficientNet-B4 (pretrained) 기반으로 Optuna 하이퍼파라미터 최적화
 - `BEST_MODEL_PATH = "best_model_efficiB4.pth"`
 - 이미지/CSV 경로: `../data2/`
 
+```python
+# =====================================================================
+# [Config 상수] EPOCHS / OPTUNA_EPOCHS / N_TRIALS 설명 및 선택 근거
+# =====================================================================
+#
+# ── EPOCHS = 20 ──────────────────────────────────────────────────────
+# 최종 학습 단계에서 전체 학습 데이터(649장)를 반복 순회하는 횟수.
+# Early Stopping (patience=3)이 적용되므로 실제로는 20번 전부 돌지 않고
+# val_loss가 연속 3회 개선되지 않으면 조기 종료된다.
+#
+#   선택 근거:
+#   - 너무 낮게(예: 10) 설정하면 Early Stopping이 발동하기 전에 학습이 끝나
+#     최적 수렴 지점을 찾지 못할 위험이 있다.
+#   - 너무 높게(예: 100) 설정하면 Early Stopping의 의미가 희석되고,
+#     탐색 시간만 길어진다.
+#   - 소규모 데이터(649장) + EfficientNet-B4 partial fine-tuning 조합에서
+#     20 epoch 이내에 충분히 수렴하는 것이 경험적으로 확인됨.
+#
+# ── OPTUNA_EPOCHS = 5 ────────────────────────────────────────────────
+# Optuna 하이퍼파라미터 탐색(Phase 3) 시, 각 trial에서 실행하는 epoch 수.
+# N_TRIALS = 20번의 trial을 각각 5 epoch씩만 돌려 빠르게 수렴 가능성을 판단한다.
+#
+#   총 탐색 비용: 20 trials × 5 epochs = 100 epoch 분량
+#
+#   선택 근거:
+#   - 1~2 epoch: 너무 짧아 val_loss 추세가 노이즈에 묻힘 → 잘못된 trial 선별
+#   - 5 epoch:   lr·batch_size 조합의 우열이 val_loss 추세로 구분 가능 ✅
+#   - 10+ epoch: 탐색 시간이 최종 학습 수준으로 길어져 Optuna의 의미 감소
+#
+# ── N_TRIALS = 20 ────────────────────────────────────────────────────
+# Optuna가 시도하는 하이퍼파라미터 조합(trial)의 총 수.
+# 탐색 공간:
+#   - batch_size: categorical [4, 8, 16]  → 3가지
+#   - lr:         loguniform 1e-5 ~ 1e-3  → 연속 범위
+#
+#   선택 근거:
+#   - 너무 적게(예: 5): 좋은 lr 구간을 운 나쁘게 놓칠 수 있음
+#   - 20회: Optuna의 TPE(Tree-structured Parzen Estimator) 알고리즘이
+#           유망 구간으로 집중적으로 수렴하기에 충분한 횟수 ✅
+#   - 너무 많게(예: 100): 탐색 시간이 과도해 실용성 저하
+#
+# ── 세 값의 포함 관계 및 순회 구조 ──────────────────────────────────
+#
+#   ┌─────────────────────────────────────────────────────┐
+#   │  [Optuna 탐색 단계]                                  │
+#   │                                                      │
+#   │  for trial in range(N_TRIALS=20):  ← 20번 반복      │
+#   │  ┌───────────────────────────────────────────────┐  │
+#   │  │  for epoch in range(OPTUNA_EPOCHS=5): ← 5번   │  │
+#   │  │      train 1 epoch                            │  │
+#   │  │      val_loss 측정 → pruning 판단             │  │
+#   │  └───────────────────────────────────────────────┘  │
+#   │                                                      │
+#   │  총 epoch 수 = 20 × 5 = 100                         │
+#   └─────────────────────────────────────────────────────┘
+#                 ↓  best (batch_size, lr) 선택
+#   ┌─────────────────────────────────────────────────────┐
+#   │  [최종 학습 단계]                                    │
+#   │                                                      │
+#   │  for epoch in range(EPOCHS=20):  ← 최대 20번        │
+#   │      train 1 epoch                                   │
+#   │      val_loss 개선 없으면 patience += 1              │
+#   │      patience == 3 → 조기 종료 (Early Stopping)     │
+#   │                                                      │
+#   └─────────────────────────────────────────────────────┘
+#
+#   핵심 포함 관계:
+#   - OPTUNA_EPOCHS는 N_TRIALS 안에 포함
+#       trial 하나가 실행될 때마다 OPTUNA_EPOCHS번의 epoch가 돌아간다.
+#       N_TRIALS는 이 묶음을 20번 반복한다.
+#   - EPOCHS는 Optuna와 별개의 독립 단계
+#       Optuna가 끝난 후 최적 파라미터로 단 한 번 실행되는 최종 학습 루프.
+#       N_TRIALS나 OPTUNA_EPOCHS와 중첩되지 않는다.
+#   - OPTUNA_EPOCHS(5) < EPOCHS(20) : 의도적인 비대칭 설계
+#       탐색은 빠르게(5 epoch), 최종 학습은 충분히(20 epoch)
+#
+#   총 학습 비용 ≈ (N_TRIALS × OPTUNA_EPOCHS) + EPOCHS
+#              = (20 × 5) + 20 = 120 epoch 분량 (Early Stopping 전)
+#
+# ── 전체 흐름 요약 (문제집 비유) ─────────────────────────────────────
+#
+#   비유 설정:
+#     문제집(649문제) = 학습 데이터셋
+#     공부 방법(한번에 읽는 페이지수·읽기 속도) = 하이퍼파라미터 (batch_size, lr)
+#
+#   ┌──────────┬───────────────────────────────┬──────────────────┐
+#   │  단계    │  비유                         │  상수            │
+#   ├──────────┼───────────────────────────────┼──────────────────┤
+#   │ 공부법   │ 20가지 방법 실험              │ N_TRIALS = 20    │
+#   │ 후보 수  │ (형광펜 색 + 읽기 속도 조합)  │                  │
+#   ├──────────┼───────────────────────────────┼──────────────────┤
+#   │ 각 방법  │ 방법당 문제집을 5번만 훑기    │ OPTUNA_EPOCHS=5  │
+#   │ 검증     │ 5번 안에 성적 안 오르면 탈락  │                  │
+#   ├──────────┼───────────────────────────────┼──────────────────┤
+#   │ 본 학습  │ 최적 방법으로 최대 20번 반복  │ EPOCHS = 20      │
+#   │          │ 성적 3회 정체 시 공부 종료    │ (patience=3)     │
+#   └──────────┴───────────────────────────────┴──────────────────┘
+#
+#   흐름:
+#     [탐색] N_TRIALS(20가지 방법) × OPTUNA_EPOCHS(5번 훑기)
+#         → 최적 batch_size, lr 선택
+#         ↓
+#     [본학습] 선택된 방법으로 EPOCHS(최대 20번 반복) + Early Stopping
+# =====================================================================
+```
+
 **2. Transform 정의**
 
 - `transform_train`: 224×224 리사이즈 + `ColorJitter(brightness=0.2, contrast=0.2)` + ImageNet 정규화
 - `transform_val/test`: 리사이즈 + ImageNet 정규화만 적용 (증강 없음)
+
+```python
+# =====================================================================
+# [Transform] transform_train 각 단계 상세 설명
+# =====================================================================
+#
+# transform_train = transforms.Compose([
+#     transforms.Resize((224, 224)),                          # 1단계
+#     transforms.ColorJitter(brightness=0.2, contrast=0.2),  # 2단계
+#     transforms.ToTensor(),                                  # 3단계
+#     transforms.Normalize(                                   # 4단계
+#         mean=[0.485, 0.456, 0.406],
+#         std=[0.229, 0.224, 0.225]
+#     )
+# ])
+#
+# ── 1단계: Resize((224, 224)) ─────────────────────────────────────────
+# 모든 이미지를 224×224 픽셀로 강제 통일
+#
+#   - 전입신고서 원본은 스캐너마다 크기가 제각각
+#   - 모델은 고정 크기 입력만 받으므로 반드시 필요
+#   - 224 선택 이유: 메모리·속도 균형
+#                   (EfficientNet-B4 기본값 380×380보다 작지만 실용적)
+#
+# ── 2단계: ColorJitter(brightness=0.2, contrast=0.2) ─────────────────
+# 밝기·대비를 ±20% 범위에서 랜덤하게 변화
+#
+#   원본 이미지        밝기 +20%           대비 -10%
+#   ┌──────────┐      ┌──────────┐         ┌──────────┐
+#   │ 홍길동 □ │  →   │ 홍길동 □ │    →    │ 홍길동 □ │
+#   │ 서명:    │      │ 서명:    │         │ 서명:    │
+#   └──────────┘      └──────────┘         └──────────┘
+#     정상 스캔          밝은 복사기           흐린 스캐너
+#
+#   - 스캐너·복사기 기종마다 밝기·대비가 다른 현실 반영
+#   - 텍스트·서명 위치는 절대 변하지 않음 → 레이블 영향 없음
+#   - train에만 적용 (val/test는 실제 환경 그대로 사용)
+#
+# ── 3단계: ToTensor() ────────────────────────────────────────────────
+# PIL Image → PyTorch Tensor 변환 + 픽셀값 스케일 축소
+#
+#   변환 전: PIL Image  [0 ~ 255]    H × W × C
+#   변환 후: Tensor     [0.0 ~ 1.0]  C × H × W
+#
+#   - C×H×W : Channel(3) × Height(224) × Width(224)
+#   - 모델이 Tensor만 입력으로 받기 때문에 필수
+#
+# ── 4단계: Normalize(mean, std) ──────────────────────────────────────
+# ImageNet 통계값으로 표준화
+#
+#   정규화 공식: (픽셀값 - mean) / std
+#
+#   채널별:
+#     R채널: (픽셀 - 0.485) / 0.229
+#     G채널: (픽셀 - 0.456) / 0.224
+#     B채널: (픽셀 - 0.406) / 0.225
+#
+#   - EfficientNet-B4가 ImageNet으로 사전학습되었으므로 같은 통계값 사용 필수
+#   - ImageNet 120만 장을 실제로 집계한 측정값이다. EfficientNet-B4가 이 분포로 학습되었으므로,
+#     fine-tuning시 동일한 값을 그대로 사용하는 것이 원칙이다.
+#   - 다른 값 사용 시 pretrained 가중치가 기대하는 입력 분포와 불일치 → 성능 저하
+#
+# ── transform_val/test와의 차이 ───────────────────────────────────────
+#
+#   단계            transform_train    transform_val/test
+#   Resize          ✅ 224×224         ✅ 224×224
+#   ColorJitter     ✅ 있음 (증강)      ❌ 없음
+#   ToTensor        ✅                 ✅
+#   Normalize       ✅                 ✅
+#
+# ── 전체 흐름 ─────────────────────────────────────────────────────────
+#
+#   원본 JPG 이미지
+#       ↓ Resize(224×224)      : 크기 통일
+#       ↓ ColorJitter(±20%)    : 스캔 환경 다양성 시뮬레이션 [train만]
+#       ↓ ToTensor()           : PIL → Tensor, [0~255] → [0.0~1.0]
+#       ↓ Normalize(ImageNet)  : pretrained 모델 입력 분포에 맞춤
+#   모델 입력 Tensor [3, 224, 224]
+# =====================================================================
+```
 
 **3. MultiLabelDataset (Custom Dataset)**
 
@@ -81,13 +267,62 @@ EfficientNet-B4 (pretrained) 기반으로 Optuna 하이퍼파라미터 최적화
 **4. `build_model()` 함수**
 
 - `efficientnet_b4(pretrained=True)` 로드
+- (ImageNet 120만 장으로 이미 학습된 가중치를 그대로 가져온다 — 처음부터 학습하지 않는다.)
+  Transfer Learning (전이 학습) 개념
+  pretrained=True가 가능한 이유는 시각적 특징의 공통성 때문이다.
+  ImageNet에서 학습한 것: 전입신고서에도 유효한 것:
+  직선/곡선 감지 → 양식 테두리, 필드 선
+  텍스처 인식 → 인쇄된 글자, 잉크 질감
+  명암 대비 → 필드 기입 여부 판별
+  형태 인식 → 도장·서명 유무
+  649장의 소규모 데이터로도 좋은 성능을 낼 수 있는 핵심 이유가 바로 pretrained=True다.
+  requires_grad는 역전파 시 gradient를 계산할지 말지를 결정하는 스위치다.
 - 전체 파라미터 freeze (`requires_grad = False`)
 - `model.features[-1]` unfreeze (Fine-tuning 대상)
 - `model.classifier[1] = nn.Linear(1792, 14)` 교체
+  model.features = [
+  features[0] : Conv2d (첫 번째 스템 블록)
+  features[1] : MBConv1 블록 그룹
+  features[2] : MBConv6 블록 그룹
+  features[3] : MBConv6 블록 그룹
+  features[4] : MBConv6 블록 그룹
+  features[5] : MBConv6 블록 그룹
+  features[6] : MBConv6 블록 그룹
+  features[7] : MBConv6 블록 그룹
+  features[-1] : features[8] ← Conv2d + BN + Swish (마지막 블록) ✅
+  ]
+  features[-1] = Sequential(
+  Conv2d(448 → 1792, kernel_size=1, bias=False)
+  ↓ 채널 수를 448에서 1792로 확장
+  BatchNorm2d(1792)
+  ↓ 배치 정규화
+  SiLU (Swish 활성화 함수)
+  ↓ 비선형 변환
+  )
+  출력: [batch_size, 1792, 7, 7]
+  입력 [3, 224, 224]
+  ↓
+  features[0~7] → ❄️ freeze (건드리지 않음)
+  ↓ [batch, 448, 7, 7]
+  features[-1] → 🔥 unfreeze (학습 대상)
+  ↓ [batch, 1792, 7, 7]
+  AdaptiveAvgPool2d
+  ↓ [batch, 1792, 1, 1]
+  Flatten
+  ↓ [batch, 1792]
+  Dropout(0.4)
+  ↓
+  nn.Linear(1792 → 14) 🔥
+  ↓ [batch, 14]
+  예측값 (14개 logit)
+  features[0~7]: 엣지, 선, 텍스처 등 범용 시각 특징
+  → ImageNet에서 이미 잘 학습됨 → 건드릴 필요 없음 ❄️
 
-> wd8_fine_final.ipynb의 `layer4` unfreeze + FC 교체 패턴 적용
+features[-1]: 448채널 → 1792채널로 압축·추상화하는 고수준 특징 변환
+→ 전입신고서 도메인에 맞게 재조정 필요 🔥
+→ 서명/도장/체크박스 등 문서 특화 특징으로 미세 조정
 
----
+## features[-1]은 "지금까지 추출한 모든 특징을 1792차원으로 압축하는 마지막 변환 레이어"다. 이 레이어만 학습시켜도 전입신고서 도메인에 충분히 적응할 수 있다.
 
 ### Phase 3 — Optuna 하이퍼파라미터 최적화
 
@@ -119,6 +354,38 @@ print(study.best_trial.params)
 - Optuna에서 찾은 `batch_size`, `lr`로 DataLoader 재생성
 - `tqdm` 진행 표시
 - Early Stopping (patience = 3): val_loss 개선 시 `best_model_efficiB4.pth` 저장
+- **TensorBoard 기록** (`SummaryWriter` 사용)
+
+**TensorBoard 기록 항목**
+
+| 태그 | 기록 시점 | x축 기준 | 참조 노트북 대응 |
+| ------------- | --------- | ------------------------- | --------------------------------- |
+| `Loss/train`  | 배치마다  | `global_step` (배치 누적) | `writer.add_scalar("Loss/train")` |
+| `Loss/val`    | 에포크마다 | `epoch`                  | `writer_ft.add_scalar(...)` |
+| `Acc/val`     | 에포크마다 | `epoch`                  | element-wise accuracy |
+
+```python
+writer = SummaryWriter()   # runs/<타임스탬프>/ 에 자동 저장
+global_step = 0
+
+# 배치 루프 내
+writer.add_scalar("Loss/train", loss.item(), global_step)
+global_step += 1
+
+# 에포크 끝 — val loss/acc 동시 기록
+writer.add_scalar("Loss/val", total_val_loss, epoch)
+writer.add_scalar("Acc/val", val_acc, epoch)
+writer.flush()   # 매 에포크마다 디스크에 즉시 기록
+
+# 학습 완료 후
+writer.close()
+```
+
+> **확인 방법**
+> ```bash
+> tensorboard --logdir=runs
+> # → 브라우저에서 http://localhost:6006 접속 → Scalars 탭
+> ```
 
 ```python
 # =====================================================================
@@ -147,11 +414,7 @@ print(study.best_trial.params)
 **8. Test 평가**
 
 - `sigmoid(output) > 0.5` → 이진 예측
-- Element-wise Accuracy 출력
-
-> wd8_fine_final.ipynb의 early stopping + test 평가 구조 적용
-
----
+- ## Element-wise Accuracy 출력
 
 ### Phase 5 — GradCAM 시각화
 
@@ -161,20 +424,8 @@ print(study.best_trial.params)
 - test셋 첫 번째 이미지 자동 선택
 - `target_layers = [model.features[-1]]`
 - `ClassifierOutputTarget(pred_class)` — 가장 높은 confidence 클래스 기준
-- subplot 2개로 GradCAM / GradCAMPlusPlus 비교 시각화
+- GradCAMPlusPlus 시각화
 - 결과 `gradcam_result.png` 저장
-
-> wd8_fine_final.ipynb의 GradCAM 코드 구조 적용, `model.layer4` → `model.features[-1]` 변경
-
----
-
-## 참조 파일
-
-| 파일                        | 참조 내용                                                              |
-| --------------------------- | ---------------------------------------------------------------------- |
-| `wd8_fine_final.ipynb`      | transform 정의, train loop, early stopping, GradCAM 코드 구조          |
-| `wd_optuna.ipynb`           | objective 함수, batch_size/lr 탐색, pruning, `study.best_trial.params` |
-| `data2/train_labels.csv` 등 | 14개 이진 레이블, 파일명 참조                                          |
 
 ---
 
@@ -188,6 +439,7 @@ print(study.best_trial.params)
 | 손실함수                | BCEWithLogitsLoss            | Multi-label 이진 분류   |
 | Early Stopping patience | 3                            | 과적합 방지             |
 | GradCAM 대상            | test셋 첫 번째 이미지 (자동) | 재현성 보장             |
+| TensorBoard 기록        | `Loss/train`(배치), `Loss/val`+`Acc/val`(에포크) | 학습 곡선·과적합 여부 실시간 모니터링 |
 
 ---
 

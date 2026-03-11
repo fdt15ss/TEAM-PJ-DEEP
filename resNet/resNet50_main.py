@@ -13,7 +13,6 @@ from PIL import Image
 from pytorch_grad_cam import GradCAMPlusPlus
 from pytorch_grad_cam.utils.image import show_cam_on_image
 from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
-from sklearn.metrics import f1_score
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import models, transforms
@@ -27,11 +26,11 @@ plt.rcParams["axes.unicode_minus"] = False  # 마이너스 기호 깨짐 방지
 # Config
 # =====================================================================
 NUM_CLASSES = 14
-EPOCHS = 30
+EPOCHS = 20
 OPTUNA_EPOCHS = 5
 N_TRIALS = 20
 PATIENCE = 3
-BEST_MODEL_PATH = "best_model_efficiB4.pth"
+BEST_MODEL_PATH = "best_model_resNet50.pth"
 
 TRAIN_CSV = "../data2/train_labels.csv"
 VAL_CSV = "../data2/val_labels.csv"
@@ -57,11 +56,15 @@ LABEL_COLS = [
     "신청인_서명도장",
 ]
 
-device = "cuda:1" if torch.cuda.is_available() else "cpu"
-
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+print('device:' + device)
 # =====================================================================
 # Phase 1 — Transform 정의
 # =====================================================================
+# [전입신고서 도메인 특성]
+# wd8_fine_final.ipynb 는 인물 이미지 기준으로 RandomHorizontalFlip 을 사용하지만,
+# 전입신고서는 정형화된 행정 양식 스캔 이미지이므로 좌우 반전 시 필드 위치가 역전 → 역효과.
+# 스캐너·복사기 밝기/대비 편차에 대응하는 ColorJitter 만 사용한다.
 transform_train = transforms.Compose(
     [
         transforms.Resize((224, 224)),
@@ -85,9 +88,9 @@ transform_val = transforms.Compose(
 # =====================================================================
 # [주의] ImageFolder를 사용하지 않는 이유
 # -----------------------------------------------------------------------
-# ImageFolder는 클래스별 서브폴더 구조(train/<클래스명>/이미지)를 전제로 동작한다.
-# 이 프로젝트는 data2/train/ 아래 모든 이미지가 하나의 폴더에 평탄(flat)하게 존재하며,
-# 레이블은 이미지 폴더가 아닌 별도 CSV에 14개 이진값으로 정의된다.
+# wd8_fine_final.ipynb 는 ImageFolder(클래스별 서브폴더) 구조를 사용하지만,
+# 이 프로젝트는 data2/train/ 아래 모든 이미지가 하나의 폴더에 평탄(flat)하게 존재하며
+# 레이블은 별도 CSV에 14개 이진값으로 정의된다.
 # → torch.utils.data.Dataset을 직접 상속한 커스텀 클래스를 사용한다.
 # -----------------------------------------------------------------------
 class MultiLabelDataset(Dataset):
@@ -112,19 +115,41 @@ class MultiLabelDataset(Dataset):
 # =====================================================================
 # Phase 2 — 모델 구성
 # =====================================================================
+# [EfficientNetB4 → ResNet-50 핵심 변경 3가지]
+#
+# 1. Fine-tune 대상
+#    EfficientNetB4 : model.features[-1]  (마지막 MBConv 블록)
+#    ResNet-50      : model.layer4        (마지막 Bottleneck 그룹, Bottleneck × 3)
+#    → ResNet-50은 features 속성이 없고 layer1~layer4로 스테이지가 나뉜다.
+#      layer4를 unfreeze하여 고수준 의미 특징을 조정한다.
+#
+# 2. 분류 헤드 교체 위치 및 입력 차원
+#    EfficientNetB4 : classifier[1] = nn.Linear(1792, 14)
+#    ResNet-50      : fc             = nn.Linear(2048, 14)
+#    → ResNet-50은 Sequential 헤드 없이 fc 단일 속성으로 분류 레이어가 붙는다.
+#      출력 특징 차원도 1792 → 2048로 달라진다.
+#
+# 3. GradCAM target layer
+#    EfficientNetB4 : [model.features[-1]]
+#    ResNet-50      : [model.layer4[-1]]
+#    → wd8_fine_final.ipynb 패턴: target_layers = [model.layer4[-1]]
+#      layer4의 마지막 Bottleneck 블록이 GradCAM 대상이다.
+# =====================================================================
 def build_model():
-    model = models.efficientnet_b4(weights=models.EfficientNet_B4_Weights.DEFAULT)
+    model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
 
     # 전체 파라미터 freeze
     for param in model.parameters():
         param.requires_grad = False
 
-    # features[-1] (마지막 MBConv 블록)만 unfreeze → Fine-tuning 대상
-    for param in model.features[-1].parameters():
+    # layer4 (마지막 Bottleneck 그룹) unfreeze — Fine-Tuning 대상
+    # layer4 구성: Bottleneck × 3 (각 블록: 1×1 → 3×3 → 1×1 Conv)
+    for param in model.layer4.parameters():
         param.requires_grad = True
 
-    # 분류 헤드 교체: 1792 → NUM_CLASSES(14)
-    model.classifier[1] = nn.Linear(1792, NUM_CLASSES)
+    # 분류 헤드 교체: fc의 Linear(2048, 1000) → Linear(2048, NUM_CLASSES)
+    # 새로 생성된 Linear 레이어는 requires_grad=True(기본값)
+    model.fc = nn.Linear(2048, NUM_CLASSES)
 
     return model.to(device)
 
@@ -201,38 +226,15 @@ writer = SummaryWriter()
 global_step = 0
 
 # -----------------------------------------------------------------------
-# [tqdm] 학습 진행 표시
-# 사용 패턴: tqdm(train_loader, desc=f"Epoch [{epoch}/{EPOCHS}]")
-#
-# 정상 실행 시 터미널 출력 예시:
-#   Epoch [1/20]: 100%|████████████| 81/81 [00:23<00:00, 3.45it/s, loss=0.423]
-#   Epoch [2/20]: 100%|████████████| 81/81 [00:22<00:00, 3.62it/s, loss=0.391]
-#
-#   81/81         → 전체 배치 수 (train 샘플 649 ÷ batch_size)
-#   [00:23<00:00] → 경과 시간 / 예상 남은 시간
-#   3.45it/s      → 초당 처리 배치 수
-#   loss=0.423    → 현재 배치 train loss (set_postfix로 표시)
-# -----------------------------------------------------------------------
-#
 # [Early Stopping] patience = 3 의 동작 방식
 # -----------------------------------------------------------------------
 # val_loss가 연속 3번 개선되지 않으면 학습을 조기 종료한다.
-# 개선이 있을 때마다 best_model_efficiB4.pth 를 덮어저장하며,
+# 개선이 있을 때마다 best_model_resNet50.pth 를 덮어저장하며,
 # 종료 시점이 아닌 "가장 좋았던 시점"의 모델이 최종 결과물이 된다.
 #
-# 예시 (EPOCHS=20 기준):
-#   Epoch 1 : val_loss=0.45 → 갱신 ✓  (저장, count=0)
-#   Epoch 2 : val_loss=0.42 → 갱신 ✓  (저장, count=0)
-#   Epoch 3 : val_loss=0.44 → 개선 없음 (count=1)
-#   Epoch 4 : val_loss=0.46 → 개선 없음 (count=2)
-#   Epoch 5 : val_loss=0.45 → 개선 없음 (count=3) → 학습 중단!
-#   → 최종 모델 = Epoch 2 시점의 가중치
-#
-# patience 값 선택 근거:
-#   patience=1 : 너무 민감 — val_loss 소폭 상승 시 즉시 종료, 지역 최솟값 위험
-#   patience=3 : 균형 OK  — 소규모 데이터(649장)+EPOCHS=20 조합에 적합
-#                           자연적 loss 진동(노이즈) 1~2 epoch 허용 후 종료
-#   patience=5+ : 느슨   — 과적합 구간을 오래 허용, best_model과 gap 커짐
+# wd8_fine_final.ipynb 의 early stopping 구조 동일 적용
+#   stop_count = 3 → PATIENCE = 3
+#   early_stop_count 카운터로 연속 미개선 횟수 추적
 # -----------------------------------------------------------------------
 for epoch in range(1, EPOCHS + 1):
     model.train()
@@ -293,53 +295,26 @@ model.eval()
 
 correct = 0
 total = 0
-subset_correct = 0
-subset_total = 0
-label_correct = torch.zeros(NUM_CLASSES)
-all_preds = []
-all_labels = []
-
 with torch.no_grad():
     for imgs, labels in test_loader:
         preds = model(imgs.to(device))
         pred_binary = (torch.sigmoid(preds) > 0.5).float()
-        labels_dev = labels.to(device)
-
-        correct += (pred_binary == labels_dev).sum().item()
+        correct += (pred_binary == labels.to(device)).sum().item()
         total += labels.numel()
 
-        # Subset Accuracy: 14개 레이블이 모두 일치해야 정답
-        subset_correct += (pred_binary == labels_dev).all(dim=1).sum().item()
-        subset_total += labels.shape[0]
-
-        # Label-wise Accuracy
-        label_correct += (pred_binary == labels_dev).sum(dim=0).cpu()
-
-        all_preds.append(pred_binary.cpu())
-        all_labels.append(labels)
-
-all_preds = torch.cat(all_preds).numpy()    # (N, 14)
-all_labels = torch.cat(all_labels).numpy()  # (N, 14)
-
-acc        = correct / total
-subset_acc = subset_correct / subset_total
-label_acc  = label_correct / subset_total
-f1_micro   = f1_score(all_labels, all_preds, average="micro", zero_division=0)
-f1_macro   = f1_score(all_labels, all_preds, average="macro", zero_division=0)
-
-print(f"Test Element-wise Accuracy : {acc:.4f}")
-print(f"Test Subset Accuracy       : {subset_acc:.4f}  ({subset_correct}/{subset_total})")
-print(f"Test F1 Micro              : {f1_micro:.4f}")
-print(f"Test F1 Macro              : {f1_macro:.4f}")
-print("\nLabel-wise Accuracy:")
-for col, la in zip(LABEL_COLS, label_acc):
-    print(f"  {col:30s}: {la:.4f}")
+acc = correct / total
+print(f"Test Element-wise Accuracy: {acc:.4f}")
 
 
 # =====================================================================
 # Phase 5 — GradCAM 시각화
 # =====================================================================
-def visualize_gradcam_pp(model, img_pil, filename, save_path="gradcam_result.png"):
+# target_layers = [model.layer4[-1]]
+#   wd8_fine_final.ipynb 패턴 그대로 적용.
+#   layer4의 마지막 Bottleneck 블록이 ResNet-50의 마지막 Conv 출력에 해당한다.
+def visualize_gradcam_pp(
+    model, img_pil, filename, save_path="gradcam_resNet50_result.png"
+):
     """GradCAM++ 히트맵을 생성하고 저장한다.
 
     Returns:
@@ -348,6 +323,7 @@ def visualize_gradcam_pp(model, img_pil, filename, save_path="gradcam_result.png
             probs       (list[float]) - 14개 클래스별 sigmoid 확률
             gradcam_img (np.ndarray)  - GradCAM++ 오버레이 이미지 (H×W×3, uint8)
     """
+    # GradCAM 계산을 위해 모든 파라미터 기울기 활성화
     for param in model.parameters():
         param.requires_grad = True
 
@@ -357,7 +333,8 @@ def visualize_gradcam_pp(model, img_pil, filename, save_path="gradcam_result.png
     probs = torch.sigmoid(pred).squeeze().tolist()
     pred_class = int(torch.sigmoid(pred).argmax().item())
 
-    target_layers = [model.features[-1]]
+    # layer4[-1]: layer4의 마지막 Bottleneck 블록 — ResNet-50 최종 Conv 출력
+    target_layers = [model.layer4[-1]]
     targets = [ClassifierOutputTarget(pred_class)]
 
     cam_pp = GradCAMPlusPlus(model=model, target_layers=target_layers)

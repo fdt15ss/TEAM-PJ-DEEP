@@ -130,7 +130,7 @@ st.markdown("""
     }
     
     .doc-item {
-        background: #f8f9fa;
+        background: #e8eaf6;
         padding: 1em;
         border-radius: 0.6em;
         margin-bottom: 0.8em;
@@ -141,8 +141,8 @@ st.markdown("""
     }
     
     .doc-name {
-        color: #333;
-        font-weight: 500;
+        color: #000;
+        font-weight: 600;
     }
     
     .doc-prob {
@@ -323,7 +323,7 @@ st.markdown("""
     }
     
     .status-item {
-        background: #f8f9fa;
+        background: #1e1e1e;
         padding: 1em;
         border-radius: 0.6em;
         display: flex;
@@ -354,9 +354,160 @@ st.markdown("""
         color: #e74c3c;
     }
     
-    @media (max-width: 768px) {
+    @media (max-width: 550px) {
         .document-content {
             grid-template-columns: 1fr;
+        }
+    }
+    
+    .field-analysis-label {
+        font-weight: 700;
+        margin-bottom: 1em;
+        font-size: 1.1em;
+        color: white;
+    }
+    
+    .field-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.8em;
+        margin-bottom: 0.6em;
+        background: rgba(102, 126, 234, 0.2);
+        border-radius: 0.5em;
+        border: 1px solid rgba(102, 126, 234, 0.5);
+    }
+    
+    .field-item-label {
+        font-weight: 600;
+        font-size: 0.9em;
+        color: #333;
+    }
+    
+    .field-item-badge {
+        font-size: 0.85em;
+        color: #667eea;
+        background: rgba(102, 126, 234, 0.15);
+        padding: 0.3em 0.6em;
+        border-radius: 0.4em;
+        font-weight: 600;
+    }
+    
+    .gradcam-section {
+        margin-top: 1.2em;
+        padding: 1em;
+        background: rgba(102, 126, 234, 0.1);
+        border-radius: 0.8em;
+        text-align: center;
+        border: 1px solid rgba(102, 126, 234, 0.3);
+    }
+    
+    .gradcam-label {
+        font-weight: 700;
+        color: #667eea;
+        margin-bottom: 1em;
+        font-size: 1em;
+    }
+    
+    /* 다크모드 지원 */
+    @media (prefers-color-scheme: dark) {
+        .main-title {
+            color: #a29bfe;
+        }
+        
+        .subtitle {
+            color: #ddd;
+        }
+        
+        .section-title {
+            color: #a29bfe;
+        }
+        
+        .input-label {
+            color: #a29bfe;
+        }
+        
+        .document-title {
+            color: #fff;
+        }
+        
+        .document-prob-badge {
+            background: #667eea;
+            color: #fff;
+        }
+        
+        .status-empty {
+            color: #ccc;
+            background: #2d2d2d;
+        }
+        
+        .file-name {
+            color: #fff;
+        }
+        
+        .status-badge.success {
+            color: #4ade80;
+        }
+        
+        .status-badge.fail {
+            color: #f87171;
+        }
+        
+        .doc-name {
+            color: #fff;
+        }
+        
+        .doc-item {
+            background: #1e1e1e;
+            border-left-color: #a29bfe;
+        }
+        
+        .doc-name {
+            color: #fff !important;
+        }
+        
+        .doc-prob {
+            background: #a29bfe;
+            color: #fff;
+        }
+        
+        .empty-state {
+            color: #ccc;
+        }
+        
+        .upload-text {
+            color: #ccc;
+        }
+        
+        .status-label {
+            color: #a29bfe;
+        }
+        
+        .field-analysis-label {
+            color: #fff !important;
+        }
+        
+        .field-item {
+            background: rgba(162, 155, 254, 0.2);
+            border-color: rgba(162, 155, 254, 0.5);
+        }
+        
+        .field-item-label {
+            color: #fff !important;
+        }
+        
+        .field-item-badge {
+            color: #a29bfe !important;
+            background: rgba(162, 155, 254, 0.2) !important;
+        }
+        
+        .gradcam-section {
+            background: rgba(162, 155, 254, 0.1);
+            border-color: rgba(162, 155, 254, 0.3);
+        }
+        
+        .gradcam-label {
+            color: #a29bfe !important;
         }
     }
     </style>
@@ -369,6 +520,8 @@ MODEL_DIR = PROJECT_ROOT / "best_model"
 # 초기화(없으면 만들어두기)
 if "predictions" not in st.session_state:
     st.session_state.predictions = None
+if "analysis_counter" not in st.session_state:
+    st.session_state.analysis_counter = 0
 
 # 민원 분류 함수
 def classify_complaint(text):
@@ -504,6 +657,29 @@ def classify_document(img_bytes, filename):
         return None, 0.0
 
 
+# 전입신고서 필드 분석 함수
+def analyze_document_fields(img_bytes, filename, model_name="convNext"):
+    """필드 분석 - FastAPI 서버 호출
+    
+    Args:
+        img_bytes: 이미지 바이트
+        filename: 파일명
+        model_name: 사용할 모델 ('efficiNetB4', 'convNext', 'resNet50')
+    """
+    try:
+        files = {"file": (filename, io.BytesIO(img_bytes), "image/jpeg")}
+        response = requests.post(
+            f"{API_BASE_URL}/{model_name}",
+            files=files
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data
+    except Exception as e:
+        st.error(f"필드 분석 API 호출 실패: {str(e)}")
+        return None
+
+
 
 # 메인 UI인터페이스
 def main():
@@ -516,6 +692,7 @@ def main():
     # 민원 입력 섹션
     st.markdown('<label class="input-label">📝 민원 내용을 자유롭게 입력해주세요</label>', unsafe_allow_html=True)
     complaint_text = st.text_area(
+        value="새로 이사왔는데 전입신고 하고싶어요",
         label="complaint",
         placeholder="예: 여권을 만들고 싶어요",
         height=120,
@@ -528,6 +705,9 @@ def main():
     if analyze_btn:
         if complaint_text.strip():
             with st.spinner("🔄 민원 분석 중..."):
+                st.session_state.analysis_counter += 1  # 분석 카운터 증가 (UI 초기화용)
+                st.session_state.predictions = None  # 이전 결과 초기화
+                st.session_state.uploaded_docs = {}  # 업로드된 문서 초기화
                 st.session_state.predictions = classify_complaint(complaint_text)
         else:
             st.warning("민원 내용을 입력해주세요.")
@@ -610,7 +790,6 @@ def main():
                 """, unsafe_allow_html=True)            
     
     # 문서 업로드 및 검증 섹션
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">📤 서류 업로드 및 검증</div>', unsafe_allow_html=True)
     
     predictions = st.session_state.predictions
@@ -623,43 +802,42 @@ def main():
         
         # 문서별 카드 생성
         for idx, (doc, prob) in enumerate(list(documents.items())[:6]):
-            doc_key = f"doc_{idx}_{doc}"
+            doc_key = f"doc_{idx}_{doc}_{st.session_state.analysis_counter}"  # 카운터 추가로 UI 초기화            
             
-            # HTML 카드 시작
-            st.markdown(f"""
-            <div class="document-card">
-                <div class="document-header">
-                    <div class="document-name-section">
-                        <span style="font-size: 1.3em;">📄</span>
-                        <div>
-                            <div class="document-title">{doc}</div>
-                        </div>
-                    </div>
-                    <div class="document-prob-badge">{prob:.0%}</div>
-                </div>
-                <div class="document-content">
-                    <div class="upload-section">
-                        <div class="upload-label">
-            """, unsafe_allow_html=True)
-            
-            # 파일 업로드
-            uploaded_file = st.file_uploader(
-                f"파일 선택 ({doc})",
-                type=["jpg", "jpeg", "png"],
-                key=doc_key,
-                label_visibility="collapsed"
-            )
+            # Streamlit columns 사용
+            col1, col2 = st.columns([1, 1], gap="medium")
 
-            st.markdown("</div>", unsafe_allow_html=True)
+            uploaded_file = None
             
+            with col1:
+                # 왼쪽: 문서 정보
+                st.markdown(f"""
+                <div class="upload-section" style="display: flex; flex-direction: column; justify-content: space-between; height: 100%;">
+                    <div>
+                        <div style="display: flex; align-items: center; gap: 0.8em; margin-bottom: 1em;">
+                            <span style="font-size: 1.5em;">📄</span>
+                            <div class="document-title">{doc}</div>
+                            <div class="document-prob-badge" style="display: inline-block;">{prob:.0%}</div>
+                        </div>                        
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                # 오른쪽: 파일 업로더 및 검증 상태
+                # 파일 업로더
+                uploaded_file = st.file_uploader(
+                    f"파일 선택 ({doc})",
+                    type=["jpg", "jpeg", "png"],
+                    key=doc_key,
+                    label_visibility="collapsed"
+                )
+                
             # 파일 업로드 시 세션 상태에 저장
             if uploaded_file:
                 st.session_state.uploaded_docs[doc_key] = uploaded_file
             
-            st.markdown('</div>', unsafe_allow_html=True)
-            
             # 검증 상태 표시
-            st.markdown('<div class="status-section">', unsafe_allow_html=True)
             if doc_key in st.session_state.uploaded_docs:
                 uploaded_file = st.session_state.uploaded_docs[doc_key]
                 file_name = uploaded_file.name
@@ -672,7 +850,9 @@ def main():
                     
                     if predicted_class:
                         # 분류 결과가 예상 문서와 일치하는지 확인
-                        is_valid = predicted_class == doc
+                        if predicted_class == "운전면허증" or predicted_class == "주민등록증":
+                            predicted_class = "신분증"
+                        is_valid = predicted_class == doc.replace("(선택)", "").strip()  # "(선택)" 제거 후 비교
                         status_icon = "✅" if is_valid else "⚠️"
                         status_text = f"{predicted_class} ({confidence:.1%})" if is_valid else f"불일치: {predicted_class}"
                         status_class = "success" if is_valid else "fail"
@@ -693,17 +873,66 @@ def main():
                         <div class="status-badge {status_class}">{status_icon} {status_text}</div>
                     </div>
                 """, unsafe_allow_html=True)
+                
+                # 전입신고서인 경우 필드 분석 결과 추가 표시
+                if predicted_class == "전입신고서" and doc == "전입신고서":
+                    st.markdown('<div class="field-analysis-label">📋 전입신고서 필드 분석 결과</div>', unsafe_allow_html=True)
+                    
+                    # 모델 선택 select box
+                    col_model1, col_model2 = st.columns([1, 2])
+                    with col_model1:
+                        st.markdown('<label style="color: #6c5ce7; font-weight: 600; font-size: 0.9em;">🤖 분석 모델 선택</label>', unsafe_allow_html=True)
+                    with col_model2:
+                        selected_model = st.selectbox(
+                            label="모델 선택",
+                            options=["efficiNetB4", "convNext", "resNet50"],
+                            index=1,  # 기본값: convNext
+                            label_visibility="collapsed"
+                        )
+                    
+                    st.markdown("")
+                    
+                    # 필드 분석 API 호출
+                    field_data = analyze_document_fields(img_bytes, file_name, model_name=selected_model)
+                    
+                    if field_data:
+                        # 필드별 결과 표시
+                        predictions = field_data.get("predictions", [])
+                        gradcam_b64 = field_data.get("gradcam_b64", "")
+                        
+                        # 필드 결과를 그리드 형태로 표시
+                        cols = st.columns(2)
+                        for i, pred in enumerate(predictions):
+                            status_icon = "✅" if pred["pred"] else "❌"
+                            st.markdown(f"""
+                            <div class="field-item">
+                                <span class="field-item-label">{pred['label']}</span>
+                                <div style="display: flex; align-items: center; gap: 0.6em;">
+                                    <span class="field-item-badge">{pred['prob']:.1%}</span>
+                                    <span style="font-size: 1.2em;">{status_icon}</span>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        # GradCAM 이미지 표시
+                        if gradcam_b64:
+                            st.markdown('<div class="gradcam-section">', unsafe_allow_html=True)
+                            st.markdown('<div class="gradcam-label">🔍 GradCAM 분석 - 모델이 주목한 영역</div>', unsafe_allow_html=True)
+                            st.image(f"data:image/png;base64,{gradcam_b64}", caption="히트맵: 빨강(높은 확신) → 파랑(낮은 확신)", use_column_width=True)
+                            st.markdown('</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown('<div style="padding: 1em; background: rgba(255, 99, 71, 0.1); border-radius: 0.6em; color: #ff6347; text-align: center; font-weight: 500;">⚠️ 필드 분석에 실패했습니다.</div>', unsafe_allow_html=True)
+                
+                st.markdown('</div>', unsafe_allow_html=True)
             else:
                 st.markdown("""
                     <div class="status-empty">📁 파일을 선택하면<br/>검증 결과가 표시됩니다</div>
                 """, unsafe_allow_html=True)
             
-            st.markdown('</div></div></div>', unsafe_allow_html=True)
+            # 카드 종료
             st.markdown("<hr style='margin: 1.5em 0; border: none; border-top: 1px solid #f0f0f0;'>", unsafe_allow_html=True)
     else:
         st.markdown('<div class="empty-state">📋 민원 내용을 먼저 분석해주세요</div>', unsafe_allow_html=True)
-    
-    st.markdown('</div>', unsafe_allow_html=True)
     
 
 if __name__ == "__main__":

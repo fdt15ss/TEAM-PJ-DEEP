@@ -13,10 +13,10 @@ from PIL import Image
 from pytorch_grad_cam import GradCAMPlusPlus
 from pytorch_grad_cam.utils.image import show_cam_on_image
 from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
-from sklearn.metrics import f1_score
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import models, transforms
+from torchvision.transforms import v2
 from tqdm import tqdm
 
 _fm._load_fontmanager(try_read_cache=False)  # 폰트 캐시 강제 갱신
@@ -27,11 +27,11 @@ plt.rcParams["axes.unicode_minus"] = False  # 마이너스 기호 깨짐 방지
 # Config
 # =====================================================================
 NUM_CLASSES = 14
-EPOCHS = 30
+EPOCHS = 20
 OPTUNA_EPOCHS = 5
 N_TRIALS = 20
 PATIENCE = 3
-BEST_MODEL_PATH = "best_model_efficiB4.pth"
+BEST_MODEL_PATH = "best_model_convNext.pth"
 
 TRAIN_CSV = "../data2/train_labels.csv"
 VAL_CSV = "../data2/val_labels.csv"
@@ -58,24 +58,30 @@ LABEL_COLS = [
 ]
 
 device = "cuda:1" if torch.cuda.is_available() else "cpu"
-
+print('device:' + device)
 # =====================================================================
 # Phase 1 — Transform 정의
 # =====================================================================
-transform_train = transforms.Compose(
+# [전입신고서 도메인 특성]
+# 정형화된 행정 양식 스캔 이미지이므로 RandomHorizontalFlip 제외.
+#   - 좌우 반전 시 필드 위치가 역전 → 역효과
+# ColorJitter만 사용하여 스캐너·복사기 밝기/대비 편차에 대응.
+transform_train = v2.Compose(
     [
-        transforms.Resize((224, 224)),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        v2.Resize((224, 224)),
+        v2.ColorJitter(brightness=0.2, contrast=0.2),
+        v2.ToImage(),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ]
 )
 
-transform_val = transforms.Compose(
+transform_val = v2.Compose(
     [
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        v2.Resize((224, 224)),
+        v2.ToImage(),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ]
 )
 
@@ -112,19 +118,43 @@ class MultiLabelDataset(Dataset):
 # =====================================================================
 # Phase 2 — 모델 구성
 # =====================================================================
+# [EfficientNetB4 → ConvNeXt-Small 핵심 변경 3가지]
+#
+# 1. Fine-tune 대상
+#    EfficientNetB4 : features[-1] (마지막 MBConv 블록 1개)
+#    ConvNeXt-Small : features[6] (Stage 3) + features[7] (최종 LayerNorm) 2개
+#    → ConvNeXt는 마지막 스테이지(features[6]) 뒤에 독립적인 LayerNorm(features[7])이
+#      분리되어 있어 함께 unfreeze해야 한다.
+#
+# 2. 분류 헤드 교체 위치 및 입력 차원
+#    EfficientNetB4 : classifier[1] = Linear(1792, 14)
+#    ConvNeXt-Small : classifier[2] = Linear(768, 14)
+#    → ConvNeXt classifier 구조: [0]LayerNorm → [1]Flatten → [2]Linear
+#      인덱스가 다르고, 출력 특징 차원도 1792 → 768로 달라진다.
+#
+# 3. Optimizer에 등록하는 파라미터 범위
+#    EfficientNetB4 : optim.Adam(model.parameters(), lr=lr)
+#    ConvNeXt-Small : optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+#    → freeze/unfreeze 대상이 2개로 명시적으로 분리되므로
+#      requires_grad=True인 파라미터만 옵티마이저에 전달하는 것이 안전하다.
+# =====================================================================
 def build_model():
-    model = models.efficientnet_b4(weights=models.EfficientNet_B4_Weights.DEFAULT)
+    model = models.convnext_small(weights=models.ConvNeXt_Small_Weights.IMAGENET1K_V1)
 
     # 전체 파라미터 freeze
     for param in model.parameters():
         param.requires_grad = False
 
-    # features[-1] (마지막 MBConv 블록)만 unfreeze → Fine-tuning 대상
-    for param in model.features[-1].parameters():
+    # features[6] (Stage 3 ConvNeXt Blocks) unfreeze — 고수준 의미 특징 조정
+    for param in model.features[6].parameters():
         param.requires_grad = True
 
-    # 분류 헤드 교체: 1792 → NUM_CLASSES(14)
-    model.classifier[1] = nn.Linear(1792, NUM_CLASSES)
+    # features[7] (최종 LayerNorm) unfreeze — 특징 정규화 스케일 조정
+    for param in model.features[7].parameters():
+        param.requires_grad = True
+
+    # 분류 헤드 교체: classifier[2]의 Linear(768, 1000) → Linear(768, NUM_CLASSES)
+    model.classifier[2] = nn.Linear(768, NUM_CLASSES)
 
     return model.to(device)
 
@@ -144,7 +174,9 @@ def objective(trial):
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     model = build_model()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    # unfreeze된 파라미터(features[6], features[7], classifier[2])만 옵티마이저에 등록
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
     criterion = nn.BCEWithLogitsLoss()
 
     total_loss = float("inf")
@@ -192,7 +224,9 @@ train_loader = DataLoader(train_dataset, batch_size=best_batch_size, shuffle=Tru
 val_loader = DataLoader(val_dataset, batch_size=best_batch_size, shuffle=False)
 
 model = build_model()
-optimizer = optim.Adam(model.parameters(), lr=best_lr)
+optimizer = optim.Adam(
+    filter(lambda p: p.requires_grad, model.parameters()), lr=best_lr
+)
 criterion = nn.BCEWithLogitsLoss()
 
 best_val_loss = float("inf")
@@ -201,23 +235,10 @@ writer = SummaryWriter()
 global_step = 0
 
 # -----------------------------------------------------------------------
-# [tqdm] 학습 진행 표시
-# 사용 패턴: tqdm(train_loader, desc=f"Epoch [{epoch}/{EPOCHS}]")
-#
-# 정상 실행 시 터미널 출력 예시:
-#   Epoch [1/20]: 100%|████████████| 81/81 [00:23<00:00, 3.45it/s, loss=0.423]
-#   Epoch [2/20]: 100%|████████████| 81/81 [00:22<00:00, 3.62it/s, loss=0.391]
-#
-#   81/81         → 전체 배치 수 (train 샘플 649 ÷ batch_size)
-#   [00:23<00:00] → 경과 시간 / 예상 남은 시간
-#   3.45it/s      → 초당 처리 배치 수
-#   loss=0.423    → 현재 배치 train loss (set_postfix로 표시)
-# -----------------------------------------------------------------------
-#
 # [Early Stopping] patience = 3 의 동작 방식
 # -----------------------------------------------------------------------
 # val_loss가 연속 3번 개선되지 않으면 학습을 조기 종료한다.
-# 개선이 있을 때마다 best_model_efficiB4.pth 를 덮어저장하며,
+# 개선이 있을 때마다 best_model_convNext.pth 를 덮어저장하며,
 # 종료 시점이 아닌 "가장 좋았던 시점"의 모델이 최종 결과물이 된다.
 #
 # 예시 (EPOCHS=20 기준):
@@ -227,12 +248,6 @@ global_step = 0
 #   Epoch 4 : val_loss=0.46 → 개선 없음 (count=2)
 #   Epoch 5 : val_loss=0.45 → 개선 없음 (count=3) → 학습 중단!
 #   → 최종 모델 = Epoch 2 시점의 가중치
-#
-# patience 값 선택 근거:
-#   patience=1 : 너무 민감 — val_loss 소폭 상승 시 즉시 종료, 지역 최솟값 위험
-#   patience=3 : 균형 OK  — 소규모 데이터(649장)+EPOCHS=20 조합에 적합
-#                           자연적 loss 진동(노이즈) 1~2 epoch 허용 후 종료
-#   patience=5+ : 느슨   — 과적합 구간을 오래 허용, best_model과 gap 커짐
 # -----------------------------------------------------------------------
 for epoch in range(1, EPOCHS + 1):
     model.train()
@@ -293,53 +308,26 @@ model.eval()
 
 correct = 0
 total = 0
-subset_correct = 0
-subset_total = 0
-label_correct = torch.zeros(NUM_CLASSES)
-all_preds = []
-all_labels = []
-
 with torch.no_grad():
     for imgs, labels in test_loader:
         preds = model(imgs.to(device))
         pred_binary = (torch.sigmoid(preds) > 0.5).float()
-        labels_dev = labels.to(device)
-
-        correct += (pred_binary == labels_dev).sum().item()
+        correct += (pred_binary == labels.to(device)).sum().item()
         total += labels.numel()
 
-        # Subset Accuracy: 14개 레이블이 모두 일치해야 정답
-        subset_correct += (pred_binary == labels_dev).all(dim=1).sum().item()
-        subset_total += labels.shape[0]
-
-        # Label-wise Accuracy
-        label_correct += (pred_binary == labels_dev).sum(dim=0).cpu()
-
-        all_preds.append(pred_binary.cpu())
-        all_labels.append(labels)
-
-all_preds = torch.cat(all_preds).numpy()    # (N, 14)
-all_labels = torch.cat(all_labels).numpy()  # (N, 14)
-
-acc        = correct / total
-subset_acc = subset_correct / subset_total
-label_acc  = label_correct / subset_total
-f1_micro   = f1_score(all_labels, all_preds, average="micro", zero_division=0)
-f1_macro   = f1_score(all_labels, all_preds, average="macro", zero_division=0)
-
-print(f"Test Element-wise Accuracy : {acc:.4f}")
-print(f"Test Subset Accuracy       : {subset_acc:.4f}  ({subset_correct}/{subset_total})")
-print(f"Test F1 Micro              : {f1_micro:.4f}")
-print(f"Test F1 Macro              : {f1_macro:.4f}")
-print("\nLabel-wise Accuracy:")
-for col, la in zip(LABEL_COLS, label_acc):
-    print(f"  {col:30s}: {la:.4f}")
+acc = correct / total
+print(f"Test Element-wise Accuracy: {acc:.4f}")
 
 
 # =====================================================================
 # Phase 5 — GradCAM 시각화
 # =====================================================================
-def visualize_gradcam_pp(model, img_pil, filename, save_path="gradcam_result.png"):
+# target_layers = [model.features[-1]]
+#   ConvNeXt-Small에서 features[-1]은 features[7] (최종 LayerNorm)에 해당한다.
+#   EfficientNetB4의 features[-1]과 표기는 동일하나 실제 레이어 종류가 다르므로 주의.
+def visualize_gradcam_pp(
+    model, img_pil, filename, save_path="gradcam_convNext_result.png"
+):
     """GradCAM++ 히트맵을 생성하고 저장한다.
 
     Returns:
@@ -348,6 +336,7 @@ def visualize_gradcam_pp(model, img_pil, filename, save_path="gradcam_result.png
             probs       (list[float]) - 14개 클래스별 sigmoid 확률
             gradcam_img (np.ndarray)  - GradCAM++ 오버레이 이미지 (H×W×3, uint8)
     """
+    # GradCAM 계산을 위해 모든 파라미터 기울기 활성화
     for param in model.parameters():
         param.requires_grad = True
 
@@ -357,6 +346,7 @@ def visualize_gradcam_pp(model, img_pil, filename, save_path="gradcam_result.png
     probs = torch.sigmoid(pred).squeeze().tolist()
     pred_class = int(torch.sigmoid(pred).argmax().item())
 
+    # features[-1] = features[7] : ConvNeXt-Small 최종 LayerNorm
     target_layers = [model.features[-1]]
     targets = [ClassifierOutputTarget(pred_class)]
 
