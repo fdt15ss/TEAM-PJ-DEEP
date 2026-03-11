@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
-from PIL import Image
+from PIL import Image, ImageOps
 from pytorch_grad_cam import GradCAMPlusPlus
 from pytorch_grad_cam.utils.image import show_cam_on_image
 from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
@@ -31,14 +31,14 @@ DATA_DIR = PROJECT_ROOT / "data"
 MODEL_DIR = PROJECT_ROOT / "best_model"
 LABEL_COLS = [
     "전입자_성명",
+    "전입자_서명도장",
     "전입자_주민등록번호",
     "전입자_연락처",
-    "전입자_서명도장",
     "전_시도",
     "전_시군구",
     "현_세대주성명",
-    "현_연락처",
     "현_서명도장",
+    "현_연락처",
     "현_주소",
     "전입사유_체크",
     "우편물서비스_동의체크",
@@ -93,6 +93,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _model: nn.Module | None = None
 
 def get_model() -> nn.Module:
+    """EfficientNet-B4 모델을 로드하고 캐시하여 반환합니다."""
     global _model
     if _model is None:
         m = models.efficientnet_b4(weights=None)
@@ -101,6 +102,40 @@ def get_model() -> nn.Module:
         m.eval()
         _model = m
     return _model
+
+# ------ ConvNeXt for document-field detection ------
+_convnext_model: nn.Module | None = None
+
+def get_convnext_model() -> nn.Module:
+    """ConvNeXt 모델을 로드하고 캐시하여 반환합니다."""
+    global _convnext_model
+    if _convnext_model is None:
+        # ConvNeXt 모델 구성 (EfficientNetB4와 동일한 구조)
+        m = models.convnext_small(weights=None)
+        # ConvNeXt의 마지막 레이어를 NUM_CLASSES로 설정
+        m.classifier[-1] = nn.Linear(768, NUM_CLASSES)
+        model_path = MODEL_DIR / "best_model_ConvNext.pth"
+        if model_path.exists():
+            m.load_state_dict(torch.load(model_path, map_location="cpu"))
+        m.eval()
+        _convnext_model = m
+    return _convnext_model
+
+# ------ ResNet50 for document-field detection ------
+_resnet50_model: nn.Module | None = None
+
+def get_resnet50_model() -> nn.Module:
+    """ResNet50 모델을 로드하고 캐시하여 반환합니다."""
+    global _resnet50_model
+    if _resnet50_model is None:
+        m = models.resnet50(weights=None)
+        m.fc = nn.Linear(2048, NUM_CLASSES)
+        model_path = MODEL_DIR / "best_model_resnet50.pth"
+        if model_path.exists():
+            m.load_state_dict(torch.load(model_path, map_location="cpu"))
+        m.eval()
+        _resnet50_model = m
+    return _resnet50_model
 
 # ------ helper models for text/document classification ------
 # caching globals for models/tokenizer/labels
@@ -167,8 +202,13 @@ def get_doc_model() -> nn.Module:
 # =====================================================================
 # 추론 + GradCAM++ for efficientnet B4 fields
 # =====================================================================
-def run_inference(image: Image.Image):
-    model = get_model()
+def run_inference(image: Image.Image, model_type: str = "efficiNetB4") -> Dict:
+    if model_type == "efficiNetB4":
+        model = get_model()
+    elif model_type == "convNext":
+        model = get_convnext_model()
+    elif model_type == "resNet50":
+        model = get_resnet50_model()
 
     # gradient 계산 활성화 (GradCAM 필요)
     for param in model.parameters():
@@ -180,7 +220,11 @@ def run_inference(image: Image.Image):
     pred_class = int(torch.sigmoid(pred).argmax().item())
 
     # GradCAM++
-    cam_pp = GradCAMPlusPlus(model=model, target_layers=[model.features[-1]])
+    cam_pp = None
+    if model_type == "resNet50":
+        cam_pp = GradCAMPlusPlus(model=model, target_layers=[model.layer4[-1]])
+    else:
+        cam_pp = GradCAMPlusPlus(model=model, target_layers=[model.features[-1]])
     gradcam_map = cam_pp(
         input_tensor=input_tensor,
         targets=[ClassifierOutputTarget(pred_class)],
@@ -203,7 +247,7 @@ def run_inference(image: Image.Image):
         }
         for i in range(NUM_CLASSES)
     ]
-
+    
     return {
         "pred_class": pred_class,
         "pred_class_name": LABEL_COLS[pred_class],
@@ -283,18 +327,31 @@ def categorize_labels(predictions: List[Tuple[str, float]]) -> Tuple[Dict, Dict,
 async def lifespan(app: FastAPI):
     """앱 시작/종료 시 필요한 리소스를 준비합니다.
 
-    - EfficientNetB4 모델(기존)과
-    - ROBERTA 텍스트 분류 모델 및
-    - EfficientNetB0 문서 분류 모델
-      을 서버 기동 시 한 번 로드하여 app.state에 저장합니다.
+    다음 모델들을 서버 기동 시 한 번 로드하여 캐시합니다:
+    - EfficientNet-B4 (필드 분석)
+    - ConvNeXt (필드 분석)
+    - ResNet50 (필드 분석)
+    - ROBERTA (텍스트 분류)
+    - EfficientNet-B0 (문서 분류)
     """
     print("========== 서버 시작: 모델 로드 ==============")
 
-    # 기존 B4 모델을 캐시해 둡니다 (get_model 내부에서 처리).
+    # -------- 필드 분석 모델 --------
+    print("필드 분석 모델 로드 중...")
+    print("  - EfficientNet-B4...", end=" ")
     get_model()
+    print("✓")
+    
+    print("  - ConvNeXt...", end=" ")
+    get_convnext_model()
+    print("✓")
+    
+    print("  - ResNet50...", end=" ")
+    get_resnet50_model()
+    print("✓")
 
     # -------- ROBERTA 텍스트 분류 모델 --------
-    print("ROBERTA tokenizer/model/labels 로드 중...")
+    print("텍스트 분류 모델(ROBERTA) 로드 중...", end=" ")
     tokenizer = get_complaint_tokenizer()
     app.state.tokenizer = tokenizer
 
@@ -302,9 +359,10 @@ async def lifespan(app: FastAPI):
     app.state.label_cols = label_cols
 
     app.state.complaint_model = get_complaint_model()
+    print("✓")
 
     # -------- EfficientNetB0 문서 분류 모델 --------
-    print("문서 분류 모델(EfficientNetB0) 로드 중...")
+    print("문서 분류 모델(EfficientNet-B0) 로드 중...", end=" ")
     app.state.doc_model = get_doc_model()
 
     # 문서 분류용 전처리 파이프라인
@@ -314,6 +372,7 @@ async def lifespan(app: FastAPI):
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     app.state.transform_doc = transform_doc
+    print("✓")
 
     print(f"사용 디바이스: {device}")
     print("========== 모델 로드 완료 =============="
@@ -346,28 +405,106 @@ def root():
         "labels": LABEL_COLS,
         "endpoints": {
             "GET /": "서버 상태 확인",
-            "POST /efficiNetB4": "이미지 업로드 → 필드 예측 + GradCAM++",
-            "POST /classify": "민원 텍스트 분류",
-            "POST /classify-document": "문서 이미지 분류",
-            "GET /icons": "부서별 아이콘 목록",
-            "GET /document-classes": "분류 가능한 문서 클래스",
-            "GET /info": "시스템 정보"
+            "POST /efficiNetB4": "EfficientNet-B4 필드 분석 (전입신고서)",
+            "POST /convNext": "ConvNeXt 필드 분석 (전입신고서)",
+            "POST /resNet50": "ResNet50 필드 분석 (전입신고서)",
+            "POST /classify": "민원 텍스트 분류 (ROBERTA)",
+            "POST /classify-document": "문서 이미지 분류 (EfficientNet-B0)"
         },
     }
 
 
 @app.post("/efficiNetB4")
-async def predict(file: UploadFile = File(...)):
+async def predict_efficiNetB4(file: UploadFile = File(...)):
+    """EfficientNet-B4를 이용한 전입신고서 필드 분석
+    
+    요청: multipart/form-data (file 필드에 이미지 파일)
+    
+    응답 예시:
+    ```json
+    {
+        "pred_class": 0,
+        "pred_class_name": "전입자_성명",
+        "predictions": [{"label": "전입자_성명", "prob": 0.95, "pred": true}, ...],
+        "gradcam_b64": "base64_encoded_image",
+        "n_filled": 10,
+        "total": 14
+    }
+    ```
+    """
     contents = await file.read()
     try:
         image = Image.open(io.BytesIO(contents)).convert("RGB")
+        image = ImageOps.exif_transpose(image)
     except Exception:
         return JSONResponse(
             status_code=400, content={"error": "이미지를 열 수 없습니다."}
         )
 
-    result = run_inference(image)
+    result = run_inference(image, model_type="efficiNetB4")
     return JSONResponse(content=result)
+
+@app.post("/convNext")
+async def predict_convNext(file: UploadFile = File(...)):
+    """ConvNeXt를 이용한 전입신고서 필드 분석
+    
+    요청: multipart/form-data (file 필드에 이미지 파일)
+    
+    응답 예시:
+    ```json
+    {
+        "pred_class": 0,
+        "pred_class_name": "전입자_성명",
+        "predictions": [{"label": "전입자_성명", "prob": 0.95, "pred": true}, ...],
+        "gradcam_b64": "base64_encoded_image",
+        "n_filled": 10,
+        "total": 14
+    }
+    ```
+    """
+    contents = await file.read()
+    try:
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+        image = ImageOps.exif_transpose(image)
+    except Exception:
+        return JSONResponse(
+            status_code=400, content={"error": "이미지를 열 수 없습니다."}
+        )
+
+    result = run_inference(image, model_type="convNext")
+    return JSONResponse(content=result)
+
+@app.post("/resNet50")
+async def predict_resNet50(file: UploadFile = File(...)):
+    """ResNet50을 이용한 전입신고서 필드 분석
+    
+    요청: multipart/form-data (file 필드에 이미지 파일)
+    
+    응답 예시:
+    ```json
+    {
+        "pred_class": 0,
+        "pred_class_name": "전입자_성명",
+        "predictions": [{"label": "전입자_성명", "prob": 0.95, "pred": true}, ...],
+        "gradcam_b64": "base64_encoded_image",
+        "n_filled": 10,
+        "total": 14
+    }
+    ```
+    """
+    contents = await file.read()
+    try:
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+        image = ImageOps.exif_transpose(image)
+    except Exception:
+        return JSONResponse(
+            status_code=400, content={"error": "이미지를 열 수 없습니다."}
+        )
+
+    result = run_inference(image, model_type="resNet50")
+    return JSONResponse(content=result)
+
+
 
 @app.post("/classify", response_model=ClassifyResponse)
 async def classify_text(
@@ -477,6 +614,7 @@ async def classify_document(
         
         # PIL Image로 변환
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        img = ImageOps.exif_transpose(img)
         
         # 모델 가져오기
         model = request.app.state.doc_model
