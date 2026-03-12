@@ -54,7 +54,7 @@ MODEL_REGISTRY = {
     },
 
     "ConvNeXt-S (전입신고서 Multi-Label) 3회차": {
-        "model_path": r"..\document_forms_source\checkpoints\optuna_trial_8_best_val_loss_0.00836.pth",
+        "model_path": r"..\document_forms_source\checkpoints\optuna_final_trial_4_best_0.00824.pth",
         "type": "multilabel",
         "num_classes": 14,
         "labels": LABEL_COLS_V2,   # ✅ 3회차도 동일
