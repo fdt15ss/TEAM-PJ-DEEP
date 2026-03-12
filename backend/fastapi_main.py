@@ -114,6 +114,7 @@ def get_convnext_model() -> nn.Module:
         m = models.convnext_small(weights=None)
         # ConvNeXt의 마지막 레이어를 NUM_CLASSES로 설정
         m.classifier[-1] = nn.Linear(768, NUM_CLASSES)
+        # model_path = MODEL_DIR / "best_model_ConvNext.pth"
         model_path = MODEL_DIR / "best_model_ConvNext.pth"
         if model_path.exists():
             m.load_state_dict(torch.load(model_path, map_location="cpu"))
@@ -183,10 +184,13 @@ def get_complaint_model() -> nn.Module:
 
 def get_doc_model() -> nn.Module:
     """EfficientNet-B0 문서 분류 모델을 로드하고 캐시하여 반환합니다."""
+    """convnext_small 문서 분류 모델을 로드하고 캐시하여 반환합니다."""
     global _doc_model
     if _doc_model is None:
-        m = models.efficientnet_b0(pretrained=True)
-        m.classifier[1] = nn.Linear(1280, len(DOC_CLASSES))
+        # m = models.efficientnet_b0(pretrained=True)
+        # m.classifier[1] = nn.Linear(1280, len(DOC_CLASSES))
+        m = models.convnext_small(pretrained=True)
+        m.classifier[-1] = nn.Linear(768, len(DOC_CLASSES))
         model_path = MODEL_DIR / "document_best_model.pt"
         if model_path.exists():
             m.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
