@@ -47,7 +47,7 @@
     ```
 
 ## 7. 환경 설정 및 주요 파일 (Environment & Files)
-*   **언어 및 프레임워크**: Python 3.x, PyTorch, Torchvision, Optuna, Streamlit.
+*   **언어 및 프레임워크**: Python 3.12, PyTorch 2.10, Torchvision 2.10, Optuna, Streamlit>=1.32, Pandas<3.
 *   **핵심 스크립트**:
     *   `pdf_to_jpg.ipynb`: 300 DPI 고해상도 이미지 변환.
     *   `create_models_data2-optuna.ipynb`: 하이퍼파라미터 자동 튜닝.
